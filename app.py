@@ -57,12 +57,28 @@ if view_mode == "Aktif Yatan Hastalar":
         if not match.empty: current_patient = match.iloc[0]
 
     if current_patient is not None:
-        st.sidebar.success(f"**Yatan Hasta:** {current_patient['name']} ({current_patient['age']} Y)")
-        with st.sidebar.expander("⚠️ Hastayı Taburcu/Ex Et"):
-            out_status = st.selectbox("Çıkış Durumu", ["Taburcu", "Ex"])
-            if st.button("Onayla ve Arşivle"):
-                execute_query("UPDATE patients SET status=?, bed_no='-', discharge_date=? WHERE id=?", [out_status, str(date.today()), int(current_patient['id'])])
-                st.rerun()
+       st.markdown("---")
+st.subheader("🚪 Hasta Çıkışı / Arşivleme")
+
+col1, col2 = st.columns(2)
+with col1:
+    cikis_turu = st.selectbox("Çıkış Türü", ["Taburcu", "Ex", "Başka Servise Devir", "Palyatif"])
+with col2:
+    cikis_tarihi = st.date_input("Çıkış Tarihi")
+
+if st.button("Hastayı Arşivle ve Yatağı Boşalt", type="primary", use_container_width=True):
+    try:
+        # Sizin yazdığınız execute_query fonksiyonunu kullanıyoruz
+        query = f"""
+            UPDATE patients 
+            SET status = '{cikis_turu}', discharge_date = '{cikis_tarihi}', bed_no = NULL 
+            WHERE id = {current_patient['id']}
+        """
+        execute_query(query)
+        st.success(f"Hasta başarıyla {cikis_turu} edildi ve arşive taşındı.")
+        st.rerun() 
+    except Exception as e:
+        st.error(f"Bir hata oluştu: {e}")
     else:
         st.sidebar.info("Bu yatak şu an BOŞ.")
         with st.sidebar.expander("➕ Yeni Hasta Kabulü"):
