@@ -111,27 +111,10 @@ with tabs[0]:
         if st.button("🔮 Asistana Danış (Analiz Et)", use_container_width=True):
             with st.spinner("Asistan verileri yorumluyor..."):
                 try:
-                    model = genai.GenerativeModel('gemini-1.5-flash')
-                    prompt = f"""
-                    Sen uzman bir yoğun bakım nöroloji doktoru asistanısın. 
-                    Hasta: {current_patient['age']} yaş, {current_patient.get('gender', '')}. Tanı: {current_patient['diagnosis']}.
-                    Özgeçmiş: {current_patient.get('history_og', 'Yok')}.
-                    
-                    Görevin:
-                    1. Verilerdeki kırmızı bayrakları (anormallikleri) saptamak.
-                    2. Bu değerleri nörolojik tanıyla klinik olarak ilişkilendirmek.
-                    3. Aksiyon planı veya Konsültasyon önerisi vermek.
-                    
-                    Ek Veri: {lab_text_input}
-                    """
-                    if lab_image is not None:
-                        img = Image.open(lab_image)
-                        response = model.generate_content([prompt, img])
-                    else:
-                        response = model.generate_content(prompt)
-                        
-                    st.success("✅ Yorumlama Tamamlandı")
-                    st.write(response.text)
+                    st.info("🔍 Google API'sine bağlanılıyor ve izin verilen modeller taranıyor...")
+                    modeller = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                    st.success("API'nizin Görebildiği Modeller Şunlar:")
+                    st.write(modeller)
                 except Exception as e:
                     st.error(f"Bir hata oluştu: {e}")
 
