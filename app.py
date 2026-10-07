@@ -259,3 +259,19 @@ if arsiv_hastalar:
     st.dataframe(df.drop(columns=["ID"]), hide_index=True, use_container_width=True)
 else:
     st.info("Arşivde henüz hasta bulunmamaktadır.")
+
+elif view_mode == "Taburcu/Ex Arşivi":
+    st.header("🗄️ Geçmiş Hasta Arşivi")
+    
+    arsiv_hastalar = fetch_data("""
+        SELECT id, name as İsim, age as Yaş, diagnosis as Tanı, 
+               status as Durum, admission_date as 'Yatış Tarihi', discharge_date as 'Çıkış Tarihi' 
+        FROM patients 
+        WHERE status != 'Aktif' 
+        ORDER BY discharge_date DESC
+    """)
+    
+    if not arsiv_hastalar.empty:
+        st.dataframe(arsiv_hastalar.drop(columns=["id"]), hide_index=True, use_container_width=True)
+    else:
+        st.info("Arşivde henüz kayıtlı hasta bulunmamaktadır.")
