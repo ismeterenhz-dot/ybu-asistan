@@ -111,7 +111,7 @@ with tabs[0]:
         if st.button("🔮 Asistana Danış (Analiz Et)", use_container_width=True):
             with st.spinner("Asistan verileri yorumluyor..."):
                 try:
-                    model = genai.GenerativeModel('gemini-pro')
+                    model = genai.GenerativeModel('gemini-1.5-flash')
                     prompt = f"""
                     Sen uzman bir yoğun bakım nöroloji doktoru asistanısın. 
                     Hasta: {current_patient['age']} yaş, {current_patient.get('gender', '')}. Tanı: {current_patient['diagnosis']}.
