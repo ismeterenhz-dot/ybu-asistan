@@ -203,3 +203,43 @@ with tabs[3]:
     for idx, row in all_evals.iterrows():
         with st.expander(f"🗓️ {row['eval_date']}"):
             st.markdown(f"**NM:** {row['nm_today']}\n\n**Not:** {row['daily_note']}")
+st.markdown("---")
+st.subheader("🚪 Hasta Çıkışı / Arşivleme")
+
+col1, col2 = st.columns(2)
+with col1:
+    cikis_turu = st.selectbox("Çıkış Türü", ["Taburcu", "Ex", "Başka Servise Devir", "Palyatif"])
+with col2:
+    cikis_tarihi = st.date_input("Çıkış Tarihi")
+
+if st.button("Hastayı Arşivle ve Yatağı Boşalt", type="primary", use_container_width=True):
+    try:
+        # Durumu güncelle, çıkış tarihini yaz ve yatağı (bed_no) boşa çıkar
+        cur.execute('''
+            UPDATE patients 
+            SET status = ?, discharge_date = ?, bed_no = NULL 
+            WHERE id = ?
+        ''', (cikis_turu, cikis_tarihi, current_patient['id']))
+        conn.commit()
+        st.success(f"Hasta başarıyla {cikis_turu} edildi ve arşive taşındı.")
+        st.rerun() # Sayfayı yenile ve yatağı boş göster
+    except Exception as e:
+        st.error(f"Veritabanı hatası: {e}")
+        st.header("🗄️ Geçmiş Hasta Arşivi")
+# Sadece durumu 'Aktif' OLMAYAN hastaları getir
+cur.execute('''
+    SELECT id, name, age, diagnosis, status, admission_date, discharge_date 
+    FROM patients 
+    WHERE status != 'Aktif' 
+    ORDER BY discharge_date DESC
+''')
+arsiv_hastalar = cur.fetchall()
+
+if arsiv_hastalar:
+    import pandas as pd
+    # Verileri tabloya dönüştür
+    df = pd.DataFrame(arsiv_hastalar, columns=["ID", "İsim", "Yaş", "Tanı", "Çıkış Türü", "Yatış Tarihi", "Çıkış Tarihi"])
+    # ID sütununu gizleyerek temiz bir görünüm sun
+    st.dataframe(df.drop(columns=["ID"]), hide_index=True, use_container_width=True)
+else:
+    st.info("Arşivde henüz hasta bulunmamaktadır.")
