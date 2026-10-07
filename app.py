@@ -112,7 +112,7 @@ with tabs[0]:
             with st.spinner("Asistan verileri yorumluyor..."):
                 try:
                     # Model ismini güncel 2.5 sürümüyle değiştirdik
-                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    model = genai.GenerativeModel('gemini-3.8-flash')
                     prompt = f"""
                     Sen uzman bir yoğun bakım nöroloji doktoru asistanısın. 
                     Hasta: {current_patient['age']} yaş, {current_patient.get('gender', '')}. Tanı: {current_patient['diagnosis']}.
