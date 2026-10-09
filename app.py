@@ -86,6 +86,8 @@ if view_mode == "Aktif Yatan Hastalar":
         st.sidebar.markdown(f"**Acil/Yatış Tarihi:** {current_patient.get('er_admission_date', '-')}")
         st.sidebar.markdown(f"**YBÜ Geliş Tarihi:** {current_patient.get('icu_admission_date', '-')}")
         st.sidebar.markdown(f"**Ön Tanı:** {patient_diag}")
+        st.sidebar.markdown(f"**EKG:** {current_patient.get('ekg', '-')}")
+        st.sidebar.markdown(f"**Kullandığı İlaçlar:** {current_patient.get('meds_ki', '-')}")
         st.sidebar.markdown("---")
 
         # --- SEKMELER (5 ADET) ---
@@ -104,7 +106,12 @@ if view_mode == "Aktif Yatan Hastalar":
             with st.form("anamnez_form"):
                 sikayet = st.text_input("Acile Geliş Şikayeti", value=current_patient.get('chief_complaint', '') or "")
                 hikaye = st.text_area("Anamnez / Neler Olmuş? (Hikaye)", value=current_patient.get('anamnesis', '') or "", height=100)
-                ozgecmis = st.text_area("Özgeçmiş (ÖG) & Kullandığı İlaçlar", value=current_patient.get('history_og', '') or "", height=80)
+                
+                c_og, c_ki = st.columns(2)
+                with c_og:
+                    ozgecmis = st.text_area("Özgeçmiş (ÖG)", value=current_patient.get('history_og', '') or "", height=80)
+                with c_ki:
+                    ilaclar = st.text_area("Kullandığı İlaçlar (Kİ)", value=current_patient.get('meds_ki', '') or "", height=80)
                 
                 st.markdown("##### İlk Klinik Durum (Yatış Anı)")
                 c1, c2 = st.columns(2)
@@ -116,8 +123,8 @@ if view_mode == "Aktif Yatan Hastalar":
                     ekg = st.text_area("EKG", value=current_patient.get('ekg', '') or "", height=100)
                 
                 if st.form_submit_button("💾 İlk Başvuru Bilgilerini Kaydet / Güncelle"):
-                    q = """UPDATE patients SET chief_complaint=?, anamnesis=?, history_og=?, initial_nm=?, initial_labs=?, initial_neuroimaging=?, ekg=? WHERE id=?"""
-                    execute_query(q, [sikayet, hikaye, ozgecmis, ilk_nm, ilk_lab, ilk_noro, ekg, int(current_patient['id'])])
+                    q = """UPDATE patients SET chief_complaint=?, anamnesis=?, history_og=?, meds_ki=?, initial_nm=?, initial_labs=?, initial_neuroimaging=?, ekg=? WHERE id=?"""
+                    execute_query(q, [sikayet, hikaye, ozgecmis, ilaclar, ilk_nm, ilk_lab, ilk_noro, ekg, int(current_patient['id'])])
                     st.success("✅ Başvuru anamnezi başarıyla güncellendi.")
                     st.rerun()
 
@@ -146,12 +153,10 @@ if view_mode == "Aktif Yatan Hastalar":
                     yara_durumu = st.text_input("Yara Durumu")
                     diger_goruntuleme = st.text_input("Diğer Görüntülemeler")
                 
-                # Uzun metin girişleri için orta-büyük genişlikte çift kolon
-                c_noro, c_kons = st.columns(2)
-                with c_noro:
-                    norogoruntuleme = st.text_area("Nörogörüntülemeler", height=120)
-                with c_kons:
-                    konsultasyonlar = st.text_area("Konsültasyonlar", height=120)
+                # Nörogörüntüleme ve Konsültasyonlar alt alta ve tam genişlikte
+                st.markdown("##### 🧠 Görüntüleme & Konsültasyon Notları")
+                norogoruntuleme = st.text_area("Nörogörüntülemeler", height=120)
+                konsultasyonlar = st.text_area("Konsültasyonlar", height=250)
                 
                 note = st.text_area("Ekstra Gözlem / Sisteme Düşülecek Not", height=80)
                 
@@ -188,6 +193,49 @@ if view_mode == "Aktif Yatan Hastalar":
                             st.success("✅ Rapor okundu ve bugünkü ekstra gözlem notuna başarıyla eklendi!")
                     else:
                         st.warning("Raporu ekleyebilmek için lütfen önce yukarıdan bugünün gözlem formunu kaydedin.")
+
+            # YZ OTOMATİK EPİKRİZ ALANI
+            st.markdown("---")
+            st.subheader("🤖 YZ Otomatik Epikriz / Günlük Özet Çıkarıcı")
+            st.info("Formu kaydedip varsa laboratuvarı ekledikten sonra, vizit veya dosya için günlük profesyonel özetinizi buradan alabilirsiniz.")
+            
+            if st.button("📝 Son Gözleme Göre Epikriz Notu Yaz", type="primary"):
+                latest_eval = fetch_data("SELECT * FROM daily_evals WHERE patient_id=? ORDER BY eval_date DESC LIMIT 1", [int(current_patient['id'])])
+                if not latest_eval.empty:
+                    with st.spinner("YZ, hastanın tıbbi verilerini derliyor..."):
+                        try:
+                            e_data = latest_eval.iloc[0]
+                            model = genai.GenerativeModel('gemini-1.5-flash')
+                            epicrisis_prompt = f"""
+                            Sen bir yoğun bakım nöroloji uzmanısın. Aşağıdaki güncel klinik verileri kullanarak, resmi dosyaya konulabilecek veya vizitte okunabilecek derli toplu, profesyonel bir GÜNLÜK EPİKRİZ (Progress Note) hazırla.
+                            
+                            KİMLİK/TANI: {current_patient['age']} yaş, {current_patient.get('gender', '')}.
+                            Ön Tanı: {patient_diag}
+                            Özgeçmiş: {current_patient.get('history_og', '-')}
+                            Kullandığı İlaçlar: {current_patient.get('meds_ki', '-')}
+                            Yatış Tarihleri: Acil: {current_patient.get('er_admission_date', '-')} / YBÜ: {current_patient.get('icu_admission_date', '-')}
+                            EKG: {current_patient.get('ekg', '-')}
+                            
+                            BUGÜNKÜ GÖZLEM ({e_data['eval_date']}):
+                            NM: {e_data.get('nm_today', '-')}
+                            Solunum: {e_data.get('intubation_status', '-')} | Sedasyon: {e_data.get('sedasyon', '-')}
+                            İnotrop: {e_data.get('inotrop', '-')} | Anti-Ödem: {e_data.get('anti_odem', '-')}
+                            Antinöbet: {e_data.get('antinobet', '-')} | Antitrombotik: {e_data.get('antitrombotik', '-')}
+                            Antibiyotik: {e_data.get('antibiotics', '-')} | Mayi: {e_data.get('mayi', '-')}
+                            Beslenme: {e_data.get('beslenme', '-')} | Kan Gazı: {e_data.get('kan_gazi', '-')}
+                            Yara: {e_data.get('yara_durumu', '-')}
+                            Nörogörüntüleme: {e_data.get('norogoruntuleme', '-')}
+                            Diğer Görüntüleme: {e_data.get('diger_goruntuleme', '-')}
+                            Konsültasyon: {e_data.get('konsultasyonlar', '-')}
+                            Ek Not & YZ Lab Analizleri: {e_data.get('daily_note', '-')}
+                            """
+                            response = model.generate_content(epicrisis_prompt)
+                            st.success("✅ Günlük Epikriz / Özet Hazır")
+                            st.markdown(response.text)
+                        except Exception as e:
+                            st.error(f"Hata: {e}")
+                else:
+                    st.warning("Bu hastaya ait henüz bir gözlem kaydı bulunmuyor.")
 
             # HASTA YAKINI BİLGİLENDİRME
             st.markdown("---")
@@ -283,11 +331,11 @@ if view_mode == "Aktif Yatan Hastalar":
         with tabs[4]:
             st.subheader("🗂️ Dosya Dökümü ve Geçmiş Bilgiler")
             
-            # 1. BÖLÜM: TEMEL HASTA BİLGİLERİ (ESKİ BİLGİLERE ULAŞIM)
             with st.expander("📌 İLK BAŞVURU VE ANAMNEZ (Hastanın Geçmişi)", expanded=True):
                 st.markdown(f"**Geliş Şikayeti:** {current_patient.get('chief_complaint', '-')}")
                 st.markdown(f"**Hikaye / Ne Olmuş?:** {current_patient.get('anamnesis', '-')}")
                 st.markdown(f"**Özgeçmiş:** {current_patient.get('history_og', '-')}")
+                st.markdown(f"**Kullandığı İlaçlar:** {current_patient.get('meds_ki', '-')}")
                 st.markdown(f"**İlk Nörolojik Muayene:** {current_patient.get('initial_nm', '-')}")
                 st.markdown(f"**İlk Nörogörüntüleme:** {current_patient.get('initial_neuroimaging', '-')}")
             
