@@ -183,7 +183,7 @@ if view_mode == "Aktif Yatan Hastalar":
                     if not latest_eval.empty:
                         with st.spinner("Rapor analiz ediliyor..."):
                             img = Image.open(lab_image)
-                            model = genai.GenerativeModel('gemini-1.5-flash')
+                            model = genai.GenerativeModel('gemini-3.8-flash')
                             response = model.generate_content(["Bu laboratuvar raporunu analiz et, anormallikleri ve klinik önemini kısaca çıkar.", img])
                             
                             eval_id = latest_eval.iloc[0]['id']
@@ -205,7 +205,7 @@ if view_mode == "Aktif Yatan Hastalar":
                     with st.spinner("YZ, hastanın tıbbi verilerini derliyor..."):
                         try:
                             e_data = latest_eval.iloc[0]
-                            model = genai.GenerativeModel('gemini-1.5-flash')
+                            model = genai.GenerativeModel('gemini-3.8-flash')
                             epicrisis_prompt = f"""
                             Sen bir yoğun bakım nöroloji uzmanısın. Aşağıdaki güncel klinik verileri kullanarak, resmi dosyaya konulabilecek veya vizitte okunabilecek derli toplu, profesyonel bir GÜNLÜK EPİKRİZ (Progress Note) hazırla.
                             
@@ -288,7 +288,7 @@ if view_mode == "Aktif Yatan Hastalar":
                 
                 with st.spinner("YZ Asistanı yanıtlıyor..."):
                     try:
-                        model = genai.GenerativeModel('gemini-1.5-flash')
+                        model = genai.GenerativeModel('gemini-3.8-flash')
                         response = model.generate_content(system_prompt)
                         with st.chat_message("assistant"):
                             st.markdown(response.text)
