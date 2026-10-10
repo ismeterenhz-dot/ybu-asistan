@@ -15,10 +15,12 @@ def get_client():
         auth_token=st.secrets["TURSO_AUTH_TOKEN"]
     )
 
-def execute_query(sql, params=[]):
+def execute_query(sql, params=None):
     with get_client() as client:
-        client.execute(sql, params)
-
+        if params:
+            client.execute(sql, params)
+        else:
+            client.execute(sql)
 def fetch_data(sql, params=[]):
     with get_client() as client:
         result = client.execute(sql, params)
