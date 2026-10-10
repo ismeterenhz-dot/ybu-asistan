@@ -6,7 +6,6 @@ import google.generativeai as genai
 from PIL import Image
 import libsql_client
 import json
-import pypdf
 
 # --- YAPAY ZEKA MODEL AYARI ---
 MODEL_NAME = "gemini-3.8-flash"
@@ -149,17 +148,18 @@ if view_mode == "Aktif Yatan Hastalar":
             uploaded_pdf = st.file_uploader("Hasta epikriz PDF dosyasını seçin", type=["pdf"], key="epicrisis_pdf_upload")
             if uploaded_pdf is not None:
                 if st.button("🤖 PDF'i Analiz Et ve İlk Başvuru Bilgilerini Otomatik Doldur"):
-                    with st.spinner("PDF okunuyor ve YZ tarafından titizlikle analiz ediliyor..."):
+                    with st.spinner("PDF YZ tarafından titizlikle analiz ediliyor..."):
                         try:
-                            reader = pypdf.PdfReader(uploaded_pdf)
-                            pdf_text = ""
-                            for page in reader.pages:
-                                pdf_text += page.extract_text() + "\n"
+                            pdf_bytes = uploaded_pdf.read()
+                            pdf_part = {
+                                "mime_type": "application/pdf",
+                                "data": pdf_bytes
+                            }
                             
                             model = genai.GenerativeModel(MODEL_NAME)
-                            json_prompt = f"""
-                            Sen kıdemli bir nöroloji uzmanısın. Aşağıdaki epikriz metnini dikkatlice oku, verileri çapraz kontrol et ve şu anahtarlara sahip geçerli bir JSON objesi döndür (başka hiçbir açıklama yazma, sadece saf JSON):
-                            {{
+                            json_prompt = """
+                            Sen kıdemli bir nöroloji uzmanısın. Ekteki epikriz PDF dosyasını dikkatlice oku, verileri çapraz kontrol et ve şu anahtarlara sahip geçerli bir JSON objesi döndür (başka hiçbir açıklama yazma, sadece saf JSON):
+                            {
                               "chief_complaint": "Acile geliş şikayeti",
                               "anamnesis": "Anamnez ve öykü detayları",
                               "history_og": "Özgeçmiş bilgileri",
@@ -169,12 +169,9 @@ if view_mode == "Aktif Yatan Hastalar":
                               "initial_neuroimaging": "İlk nörogörüntüleme bulguları",
                               "ekg": "EKG bulguları",
                               "pre_diagnosis": "Ön tanılar"
-                            }}
-
-                            PDF Metni:
-                            {pdf_text}
+                            }
                             """
-                            response = model.generate_content(json_prompt)
+                            response = model.generate_content([json_prompt, pdf_part])
                             cleaned_json = response.text.strip().replace("```json", "").replace("```", "").strip()
                             data_dict = json.loads(cleaned_json)
                             
@@ -337,7 +334,7 @@ if view_mode == "Aktif Yatan Hastalar":
                         except Exception as e:
                             st.error(f"Hata: {e}")
                 else:
-                    st.warning("Bu hastaya ait henüz bir gözlem kaydı bulunmuyor.")
+                    st.warning("Bu hastaya ait henüz geçmiş bir günlük gözlem kaydı bulunmuyor.")
 
             # HASTA YAKINI BİLGİLENDİRME
             st.markdown("---")
@@ -350,7 +347,7 @@ if view_mode == "Aktif Yatan Hastalar":
                 with st.form("hy_form"):
                     hy_text = st.text_area("Hasta Yakını Bilgilendirme Özeti", value=safe_str(current_hy), height=100)
                     if st.form_submit_button("💾 Bilgilendirmeyi Bugüne Kaydet"):
-                        execute_query("UPDATE daily_evals SET hasta_yakini=? WHERE id=?", [hy_text, int(eval_id)], [])
+                        execute_query("UPDATE daily_evals SET hasta_yakini=? WHERE id=?", [hy_text, int(eval_id)])
                         st.success("✅ Hasta yakını bilgilendirmesi bugünkü kayda eklendi!")
                         st.rerun()
             else:
@@ -369,7 +366,7 @@ if view_mode == "Aktif Yatan Hastalar":
             if user_prompt := st.chat_input("Vaka ile ilgili ne danışmak istersiniz?"):
                 with st.chat_message("user"):
                     st.markdown(user_prompt)
-                execute_query("INSERT INTO ai_chats (patient_id, role, content) VALUES (?, ?, ?)", [int(current_patient['id']), "user", user_prompt], [])
+                execute_query("INSERT INTO ai_chats (patient_id, role, content) VALUES (?, ?, ?)", [int(current_patient['id']), "user", user_prompt])
                 
                 history_text = "\n".join([f"{r['role']}: {r['content']}" for _, r in messages.iterrows()])
                 system_prompt = f"""
@@ -394,7 +391,7 @@ if view_mode == "Aktif Yatan Hastalar":
                         response = model.generate_content(system_prompt)
                         with st.chat_message("assistant"):
                             st.markdown(response.text)
-                        execute_query("INSERT INTO ai_chats (patient_id, role, content) VALUES (?, ?, ?)", [int(current_patient['id']), "assistant", response.text], [])
+                        execute_query("INSERT INTO ai_chats (patient_id, role, content) VALUES (?, ?, ?)", [int(current_patient['id']), "assistant", response.text])
                         st.rerun()
                     except Exception as e:
                         st.error(f"Bağlantı hatası: {e}")
@@ -407,10 +404,10 @@ if view_mode == "Aktif Yatan Hastalar":
                 p_date = c1.date_input("Planlanan Tarih", date.today() + timedelta(days=1))
                 p_desc = c2.text_input("İşlem / Konsültasyon / Aksiyon Detayı")
                 if st.form_submit_button("➕ Planı Ekle") and p_desc:
-                    execute_query("INSERT INTO future_plans (patient_id, plan_date, description) VALUES (?, ?, ?)", [int(current_patient['id']), str(p_date), p_desc], [])
+                    execute_query("INSERT INTO future_plans (patient_id, plan_date, description) VALUES (?, ?, ?)", [int(current_patient['id']), str(p_date), p_desc])
                     st.rerun()
                     
-            plans = fetch_data("SELECT * FROM future_plans WHERE patient_id=? ORDER BY is_completed ASC, plan_date ASC", [int(current_patient['id'])], [])
+            plans = fetch_data("SELECT * FROM future_plans WHERE patient_id=? ORDER BY is_completed ASC, plan_date ASC", [int(current_patient['id'])])
             if not plans.empty:
                 for idx, row in plans.iterrows():
                     plan_date = datetime.strptime(row['plan_date'], "%Y-%m-%d").date()
@@ -422,7 +419,7 @@ if view_mode == "Aktif Yatan Hastalar":
                         col_c, col_t = st.columns([0.05, 0.95])
                         check = col_c.checkbox("", key=f"p_{row['id']}")
                         if check:
-                            execute_query("UPDATE future_plans SET is_completed=1 WHERE id=?", [int(row['id'])], [])
+                            execute_query("UPDATE future_plans SET is_completed=1 WHERE id=?", [int(row['id'])])
                             st.rerun()
                         
                         if delta < 0: col_t.error(f"GECİKTİ! [{row['plan_date']}] - {row['description']}")
@@ -442,7 +439,7 @@ if view_mode == "Aktif Yatan Hastalar":
                 st.markdown(f"**İlk Nörogörüntüleme:** {safe_str(current_patient.get('initial_neuroimaging', '-'))}")
             
             st.markdown("### 🗓️ Geçmiş Günlük Gözlemler")
-            all_evals = fetch_data("SELECT * FROM daily_evals WHERE patient_id=? ORDER BY eval_date DESC", [int(current_patient['id'])], [])
+            all_evals = fetch_data("SELECT * FROM daily_evals WHERE patient_id=? ORDER BY eval_date DESC", [int(current_patient['id'])])
             
             if not all_evals.empty:
                 for idx, row in all_evals.iterrows():
@@ -473,7 +470,7 @@ if view_mode == "Aktif Yatan Hastalar":
 
             if st.button("Hastayı Arşivle ve Yatağı Boşalt"):
                 try:
-                    execute_query(f"UPDATE patients SET status = ?, discharge_date = ?, bed_no = NULL WHERE id = ?", [cikis_turu, str(cikis_tarihi), int(current_patient['id'])])
+                    execute_query("UPDATE patients SET status = ?, discharge_date = ?, bed_no = NULL WHERE id = ?", [cikis_turu, str(cikis_tarihi), int(current_patient['id'])])
                     st.success(f"Hasta başarıyla {cikis_turu} edildi ve arşive taşındı.")
                     st.rerun() 
                 except Exception as e:
@@ -507,7 +504,7 @@ elif view_mode == "Taburcu/Ex Arşivi":
         SELECT id, name as İsim, age as Yaş, pre_diagnosis as 'Ön Tanı', 
                status as Durum, er_admission_date as 'Acil Yatış', discharge_date as 'Çıkış Tarihi' 
         FROM patients WHERE status != 'Aktif' ORDER BY discharge_date DESC
-    """, [])
+    """)
     if not arsiv_hastalar.empty:
         st.dataframe(arsiv_hastalar.drop(columns=["id"]), hide_index=True, use_container_width=True)
     else:
