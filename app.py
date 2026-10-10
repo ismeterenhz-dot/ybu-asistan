@@ -6,6 +6,9 @@ import google.generativeai as genai
 from PIL import Image
 import libsql_client
 
+# --- YAPAY ZEKA MODEL AYARI ---
+MODEL_NAME = "gemini-3.8-flash"
+
 # --- GÜVENLİ BAĞLANTILAR (SECRETS) ---
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
@@ -15,12 +18,10 @@ def get_client():
         auth_token=st.secrets["TURSO_AUTH_TOKEN"]
     )
 
-def execute_query(sql, params=None):
+def execute_query(sql, params=[]):
     with get_client() as client:
-        if params:
-            client.execute(sql, params)
-        else:
-            client.execute(sql)
+        client.execute(sql, params)
+
 def fetch_data(sql, params=[]):
     with get_client() as client:
         result = client.execute(sql, params)
@@ -38,9 +39,9 @@ def init_db():
         '''CREATE TABLE IF NOT EXISTS ai_chats (id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)'''
     ]
     for q in queries:
-        execute_query(q)
+        execute_query(q, [])
 
-    # Yeni eklenen sütunlar (Anamnez ve diğerleri)
+    # Dinamik Sütun Ekleme
     new_patient_cols = {
         "er_admission_date": "DATE", "icu_admission_date": "DATE", "pre_diagnosis": "TEXT", "ekg": "TEXT",
         "chief_complaint": "TEXT", "anamnesis": "TEXT", "initial_nm": "TEXT", "initial_labs": "TEXT", "initial_neuroimaging": "TEXT"
@@ -52,11 +53,11 @@ def init_db():
     }
     
     for col, d_type in new_patient_cols.items():
-        try: execute_query(f"ALTER TABLE patients ADD COLUMN {col} {d_type}")
+        try: execute_query(f"ALTER TABLE patients ADD COLUMN {col} {d_type}", [])
         except: pass
         
     for col, d_type in new_eval_cols.items():
-        try: execute_query(f"ALTER TABLE daily_evals ADD COLUMN {col} {d_type}")
+        try: execute_query(f"ALTER TABLE daily_evals ADD COLUMN {col} {d_type}", [])
         except: pass
 
 init_db()
@@ -69,7 +70,7 @@ st.sidebar.header("📌 Servis Durumu")
 view_mode = st.sidebar.radio("Görünüm:", ["Aktif Yatan Hastalar", "Taburcu/Ex Arşivi"])
 
 if view_mode == "Aktif Yatan Hastalar":
-    active_patients = fetch_data("SELECT * FROM patients WHERE status = 'Aktif' ORDER BY bed_no")
+    active_patients = fetch_data("SELECT * FROM patients WHERE status = 'Aktif' ORDER BY bed_no", [])
     bed_list = [f"Yatak {i}" for i in range(1, 10)]
     selected_bed = st.sidebar.selectbox("Yatak Seçiniz:", bed_list)
     
@@ -104,7 +105,7 @@ if view_mode == "Aktif Yatan Hastalar":
         # TAB 1: İLK BAŞVURU & ANAMNEZ
         with tabs[0]:
             st.subheader("🏥 İlk Başvuru, Anamnez ve Temel Bulgular")
-            st.info("Hastanın acil veya servise ilk gelişindeki hikayesini ve temel bulgularını buradan girebilir veya güncelleyebilirsiniz.")
+            st.info("Kutulara verileri girin. İşiniz bitince alttaki kaydet butonuna tıklayın.")
             with st.form("anamnez_form"):
                 sikayet = st.text_input("Acile Geliş Şikayeti", value=current_patient.get('chief_complaint', '') or "")
                 hikaye = st.text_area("Anamnez / Neler Olmuş? (Hikaye)", value=current_patient.get('anamnesis', '') or "", height=100)
@@ -155,7 +156,6 @@ if view_mode == "Aktif Yatan Hastalar":
                     yara_durumu = st.text_input("Yara Durumu")
                     diger_goruntuleme = st.text_input("Diğer Görüntülemeler")
                 
-                # Nörogörüntüleme ve Konsültasyonlar alt alta ve tam genişlikte
                 st.markdown("##### 🧠 Görüntüleme & Konsültasyon Notları")
                 norogoruntuleme = st.text_area("Nörogörüntülemeler", height=120)
                 konsultasyonlar = st.text_area("Konsültasyonlar", height=250)
@@ -175,24 +175,30 @@ if view_mode == "Aktif Yatan Hastalar":
                     st.success("✅ Gözlem Kaydı Başarıyla Alındı.")
                     st.rerun()
 
-            # LAB RAPOR YÜKLEME
+            # ÇOKLU LAB RAPOR YÜKLEME
             st.markdown("---")
             st.subheader("🔬 Lab Raporu Yükleme")
-            lab_image = st.file_uploader("Lab sonucu yükleyin (YZ otomatik okuyup bugünkü nota ekler)", type=["png", "jpg", "jpeg"])
-            if lab_image:
+            lab_images = st.file_uploader("Lab sonuçlarını yükleyin (Aynı anda birden fazla fotoğraf seçebilirsiniz)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+            if lab_images:
                 if st.button("YZ ile Oku ve Günlük Nota Ekle"):
                     latest_eval = fetch_data("SELECT id, daily_note FROM daily_evals WHERE patient_id=? ORDER BY eval_date DESC LIMIT 1", [int(current_patient['id'])])
                     if not latest_eval.empty:
-                        with st.spinner("Rapor analiz ediliyor..."):
-                            img = Image.open(lab_image)
-                            model = genai.GenerativeModel('gemini-3.8-flash')
-                            response = model.generate_content(["Bu laboratuvar raporunu analiz et, anormallikleri ve klinik önemini kısaca çıkar.", img])
+                        with st.spinner(f"{len(lab_images)} adet rapor sırayla analiz ediliyor, lütfen bekleyin..."):
+                            model = genai.GenerativeModel(MODEL_NAME)
+                            all_responses = []
                             
+                            for i, lab_image in enumerate(lab_images):
+                                img = Image.open(lab_image)
+                                response = model.generate_content(["Bu laboratuvar raporunu analiz et, anormallikleri ve klinik önemini kısaca çıkar.", img])
+                                all_responses.append(f"--- Eklenen Rapor {i+1} ---\n{response.text}")
+                            
+                            combined_analysis = "\n\n".join(all_responses)
                             eval_id = latest_eval.iloc[0]['id']
                             old_note = latest_eval.iloc[0]['daily_note'] or ""
-                            new_note = old_note + f"\n\n[YZ Lab Analizi]: {response.text}"
+                            new_note = old_note + f"\n\n[YZ Çoklu Lab Analizi]:\n{combined_analysis}"
+                            
                             execute_query("UPDATE daily_evals SET daily_note=? WHERE id=?", [new_note, int(eval_id)])
-                            st.success("✅ Rapor okundu ve bugünkü ekstra gözlem notuna başarıyla eklendi!")
+                            st.success(f"✅ Toplam {len(lab_images)} rapor okundu ve bugünkü ekstra gözlem notuna başarıyla eklendi!")
                     else:
                         st.warning("Raporu ekleyebilmek için lütfen önce yukarıdan bugünün gözlem formunu kaydedin.")
 
@@ -201,13 +207,13 @@ if view_mode == "Aktif Yatan Hastalar":
             st.subheader("🤖 YZ Otomatik Epikriz / Günlük Özet Çıkarıcı")
             st.info("Formu kaydedip varsa laboratuvarı ekledikten sonra, vizit veya dosya için günlük profesyonel özetinizi buradan alabilirsiniz.")
             
-            if st.button("📝 Son Gözleme Göre Epikriz Notu Yaz", type="primary"):
+            if st.button("📝 Son Gözleme Göre Epikriz Notu Yaz"):
                 latest_eval = fetch_data("SELECT * FROM daily_evals WHERE patient_id=? ORDER BY eval_date DESC LIMIT 1", [int(current_patient['id'])])
                 if not latest_eval.empty:
                     with st.spinner("YZ, hastanın tıbbi verilerini derliyor..."):
                         try:
                             e_data = latest_eval.iloc[0]
-                            model = genai.GenerativeModel('gemini-3.8-flash')
+                            model = genai.GenerativeModel(MODEL_NAME)
                             epicrisis_prompt = f"""
                             Sen bir yoğun bakım nöroloji uzmanısın. Aşağıdaki güncel klinik verileri kullanarak, resmi dosyaya konulabilecek veya vizitte okunabilecek derli toplu, profesyonel bir GÜNLÜK EPİKRİZ (Progress Note) hazırla.
                             
@@ -249,8 +255,8 @@ if view_mode == "Aktif Yatan Hastalar":
                 current_hy = latest_eval_hy.iloc[0]['hasta_yakini']
                 with st.form("hy_form"):
                     hy_text = st.text_area("Hasta Yakını Bilgilendirme Özeti", value=current_hy if current_hy else "", height=100)
-                    if st.form_submit_button("Bilgilendirmeyi Bugüne Kaydet"):
-                        execute_query("UPDATE daily_evals SET hasta_yakini=? WHERE id=?", [hy_text, int(eval_id)])
+                    if st.form_submit_button("💾 Bilgilendirmeyi Bugüne Kaydet"):
+                        execute_query("UPDATE daily_evals SET hasta_yakini=? WHERE id=?", [hy_text, int(eval_id)], [])
                         st.success("✅ Hasta yakını bilgilendirmesi bugünkü kayda eklendi!")
                         st.rerun()
             else:
@@ -290,7 +296,7 @@ if view_mode == "Aktif Yatan Hastalar":
                 
                 with st.spinner("YZ Asistanı yanıtlıyor..."):
                     try:
-                        model = genai.GenerativeModel('gemini-3.8-flash')
+                        model = genai.GenerativeModel(MODEL_NAME)
                         response = model.generate_content(system_prompt)
                         with st.chat_message("assistant"):
                             st.markdown(response.text)
@@ -306,7 +312,7 @@ if view_mode == "Aktif Yatan Hastalar":
                 c1, c2 = st.columns([1, 3])
                 p_date = c1.date_input("Planlanan Tarih", date.today() + timedelta(days=1))
                 p_desc = c2.text_input("İşlem / Konsültasyon / Aksiyon Detayı")
-                if st.form_submit_button("Planı Ekle") and p_desc:
+                if st.form_submit_button("➕ Planı Ekle") and p_desc:
                     execute_query("INSERT INTO future_plans (patient_id, plan_date, description) VALUES (?, ?, ?)", [int(current_patient['id']), str(p_date), p_desc])
                     st.rerun()
                     
@@ -371,9 +377,9 @@ if view_mode == "Aktif Yatan Hastalar":
             with col2:
                 cikis_tarihi = st.date_input("Çıkış Tarihi")
 
-            if st.button("Hastayı Arşivle ve Yatağı Boşalt", type="primary", use_container_width=True):
+            if st.button("Hastayı Arşivle ve Yatağı Boşalt"):
                 try:
-                    execute_query(f"UPDATE patients SET status = '{cikis_turu}', discharge_date = '{cikis_tarihi}', bed_no = NULL WHERE id = {current_patient['id']}")
+                    execute_query(f"UPDATE patients SET status = '{cikis_turu}', discharge_date = '{cikis_tarihi}', bed_no = NULL WHERE id = {current_patient['id']}", [])
                     st.success(f"Hasta başarıyla {cikis_turu} edildi ve arşive taşındı.")
                     st.rerun() 
                 except Exception as e:
@@ -395,7 +401,7 @@ if view_mode == "Aktif Yatan Hastalar":
                 p_diag = st.text_area("Ön Tanı(lar)")
                 st.caption("Detaylı şikayet ve anamnezi hastayı yatağa aldıktan sonra 1. Sekmeden girebilirsiniz.")
                 
-                if st.form_submit_button("Hastayı Yatağa Al") and p_name:
+                if st.form_submit_button("📥 Hastayı Yatağa Al") and p_name:
                     execute_query("INSERT INTO patients (bed_no, name, age, gender, er_admission_date, icu_admission_date, pre_diagnosis) VALUES (?, ?, ?, ?, ?, ?, ?)", 
                                   [selected_bed, p_name, int(p_age), p_gender, str(p_er_date), str(p_icu_date), p_diag])
                     st.rerun()
@@ -407,7 +413,7 @@ elif view_mode == "Taburcu/Ex Arşivi":
         SELECT id, name as İsim, age as Yaş, pre_diagnosis as 'Ön Tanı', 
                status as Durum, er_admission_date as 'Acil Yatış', discharge_date as 'Çıkış Tarihi' 
         FROM patients WHERE status != 'Aktif' ORDER BY discharge_date DESC
-    """)
+    """, [])
     if not arsiv_hastalar.empty:
         st.dataframe(arsiv_hastalar.drop(columns=["id"]), hide_index=True, use_container_width=True)
     else:
