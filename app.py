@@ -5,6 +5,8 @@ from datetime import date, datetime, timedelta
 import google.generativeai as genai
 from PIL import Image
 import libsql_client
+import json
+import pypdf
 
 # --- YAPAY ZEKA MODEL AYARI ---
 MODEL_NAME = "gemini-3.8-flash"
@@ -29,6 +31,11 @@ def fetch_data(sql, params=[]):
             return pd.DataFrame([tuple(row) for row in result.rows], columns=result.columns)
         return pd.DataFrame(columns=result.columns)
 
+def safe_str(val):
+    if val is None or pd.isna(val):
+        return ""
+    return str(val)
+
 # --- VERİTABANI KURULUMU ---
 def init_db():
     queries = [
@@ -41,7 +48,6 @@ def init_db():
     for q in queries:
         execute_query(q, [])
 
-    # Dinamik Sütun Ekleme
     new_patient_cols = {
         "er_admission_date": "DATE", "icu_admission_date": "DATE", "pre_diagnosis": "TEXT", "ekg": "TEXT",
         "chief_complaint": "TEXT", "anamnesis": "TEXT", "initial_nm": "TEXT", "initial_labs": "TEXT", "initial_neuroimaging": "TEXT"
@@ -80,18 +86,49 @@ if view_mode == "Aktif Yatan Hastalar":
         if not match.empty: current_patient = match.iloc[0]
 
     if current_patient is not None:
-        patient_diag = current_patient.get('pre_diagnosis') if current_patient.get('pre_diagnosis') else current_patient.get('diagnosis', 'Girilemedi')
+        patient_diag = current_patient.get('pre_diagnosis') if current_patient.get('pre_diagnosis') else current_patient.get('diagnosis', '')
         
         # --- SOL MENÜ HASTA KARTI ---
         st.sidebar.markdown("---")
         st.sidebar.markdown(f"### 🛏️ {current_patient['bed_no']}")
-        st.sidebar.markdown(f"**{current_patient['name']}** ({current_patient['age']} Y, {current_patient.get('gender', '')})")
-        st.sidebar.markdown(f"**Acil/Yatış Tarihi:** {current_patient.get('er_admission_date', '-')}")
-        st.sidebar.markdown(f"**YBÜ Geliş Tarihi:** {current_patient.get('icu_admission_date', '-')}")
-        st.sidebar.markdown(f"**Ön Tanı:** {patient_diag}")
-        st.sidebar.markdown(f"**EKG:** {current_patient.get('ekg', '-')}")
-        st.sidebar.markdown(f"**Kullandığı İlaçlar:** {current_patient.get('meds_ki', '-')}")
+        st.sidebar.markdown(f"**{safe_str(current_patient['name'])}** ({safe_str(current_patient['age'])} Y, {safe_str(current_patient.get('gender', ''))})")
+        st.sidebar.markdown(f"**Acil/Yatış Tarihi:** {safe_str(current_patient.get('er_admission_date', '-'))}")
+        st.sidebar.markdown(f"**YBÜ Geliş Tarihi:** {safe_str(current_patient.get('icu_admission_date', '-'))}")
+        st.sidebar.markdown(f"**Ön Tanı:** {safe_str(patient_diag)}")
+        st.sidebar.markdown(f"**EKG:** {safe_str(current_patient.get('ekg', '-'))}")
+        st.sidebar.markdown(f"**Kullandığı İlaçlar:** {safe_str(current_patient.get('meds_ki', '-'))}")
         st.sidebar.markdown("---")
+
+        # Sol menüden hasta bilgilerini düzenleme paneli
+        with st.sidebar.expander("✏️ Hasta Bilgilerini Düzenle"):
+            with st.form("edit_patient_sidebar_form"):
+                ed_name = st.text_input("Ad Soyad", value=safe_str(current_patient.get('name')))
+                ed_age = st.number_input("Yaş", 1, 120, int(current_patient['age']) if pd.notna(current_patient.get('age')) else 60)
+                ed_gender = st.selectbox("Cinsiyet", ["Kadın", "Erkek"], index=0 if current_patient.get('gender') == "Kadın" else 1)
+                
+                try:
+                    def_er_date = datetime.strptime(str(current_patient.get('er_admission_date')), "%Y-%m-%d").date()
+                except:
+                    def_er_date = date.today()
+                
+                try:
+                    def_icu_date = datetime.strptime(str(current_patient.get('icu_admission_date')), "%Y-%m-%d").date()
+                except:
+                    def_icu_date = date.today()
+
+                ed_er_date = st.date_input("Acil/Yatış Tarihi", def_er_date)
+                ed_icu_date = st.date_input("YBÜ Geliş Tarihi", def_icu_date)
+                ed_diag = st.text_area("Ön Tanı", value=safe_str(patient_diag))
+                ed_ekg = st.text_area("EKG", value=safe_str(current_patient.get('ekg')))
+                ed_meds = st.text_area("Kullandığı İlaçlar", value=safe_str(current_patient.get('meds_ki')))
+                
+                if st.form_submit_button("💾 Bilgileri Güncelle"):
+                    execute_query(
+                        "UPDATE patients SET name=?, age=?, gender=?, er_admission_date=?, icu_admission_date=?, pre_diagnosis=?, ekg=?, meds_ki=? WHERE id=?",
+                        [ed_name, int(ed_age), ed_gender, str(ed_er_date), str(ed_icu_date), ed_diag, ed_ekg, ed_meds, int(current_patient['id'])]
+                    )
+                    st.success("✅ Hasta bilgileri güncellendi!")
+                    st.rerun()
 
         # --- SEKMELER (5 ADET) ---
         tabs = st.tabs([
@@ -105,25 +142,82 @@ if view_mode == "Aktif Yatan Hastalar":
         # TAB 1: İLK BAŞVURU & ANAMNEZ
         with tabs[0]:
             st.subheader("🏥 İlk Başvuru, Anamnez ve Temel Bulgular")
-            st.info("Kutulara verileri girin. İşiniz bitince alttaki kaydet butonuna tıklayın.")
+            st.info("Hastanın acil veya servise ilk gelişindeki hikayesini elle girebilir ya da aşağıdan PDF epikriz yükleyerek YZ ile otomatik doldurabilirsiniz.")
+            
+            # --- PDF İLE OTOMATİK DOLDURMA ---
+            st.markdown("##### 📄 PDF Epikriz Yükle & YZ Otomatik Doldur")
+            uploaded_pdf = st.file_uploader("Hasta epikriz PDF dosyasını seçin", type=["pdf"], key="epicrisis_pdf_upload")
+            if uploaded_pdf is not None:
+                if st.button("🤖 PDF'i Analiz Et ve İlk Başvuru Bilgilerini Otomatik Doldur"):
+                    with st.spinner("PDF okunuyor ve YZ tarafından titizlikle analiz ediliyor..."):
+                        try:
+                            reader = pypdf.PdfReader(uploaded_pdf)
+                            pdf_text = ""
+                            for page in reader.pages:
+                                pdf_text += page.extract_text() + "\n"
+                            
+                            model = genai.GenerativeModel(MODEL_NAME)
+                            json_prompt = f"""
+                            Sen kıdemli bir nöroloji uzmanısın. Aşağıdaki epikriz metnini dikkatlice oku, verileri çapraz kontrol et ve şu anahtarlara sahip geçerli bir JSON objesi döndür (başka hiçbir açıklama yazma, sadece saf JSON):
+                            {{
+                              "chief_complaint": "Acile geliş şikayeti",
+                              "anamnesis": "Anamnez ve öykü detayları",
+                              "history_og": "Özgeçmiş bilgileri",
+                              "meds_ki": "Kullandığı ilaçlar",
+                              "initial_nm": "İlk nörolojik muayene bulguları",
+                              "initial_labs": "İlk laboratuvar bulguları",
+                              "initial_neuroimaging": "İlk nörogörüntüleme bulguları",
+                              "ekg": "EKG bulguları",
+                              "pre_diagnosis": "Ön tanılar"
+                            }}
+
+                            PDF Metni:
+                            {pdf_text}
+                            """
+                            response = model.generate_content(json_prompt)
+                            cleaned_json = response.text.strip().replace("```json", "").replace("```", "").strip()
+                            data_dict = json.loads(cleaned_json)
+                            
+                            execute_query(
+                                """UPDATE patients SET chief_complaint=?, anamnesis=?, history_og=?, meds_ki=?, 
+                                   initial_nm=?, initial_labs=?, initial_neuroimaging=?, ekg=?, pre_diagnosis=? WHERE id=?""",
+                                [
+                                    data_dict.get("chief_complaint", ""),
+                                    data_dict.get("anamnesis", ""),
+                                    data_dict.get("history_og", ""),
+                                    data_dict.get("meds_ki", ""),
+                                    data_dict.get("initial_nm", ""),
+                                    data_dict.get("initial_labs", ""),
+                                    data_dict.get("initial_neuroimaging", ""),
+                                    data_dict.get("ekg", ""),
+                                    data_dict.get("pre_diagnosis", ""),
+                                    int(current_patient['id'])
+                                ]
+                            )
+                            st.success("✅ PDF başarıyla analiz edildi ve ilk başvuru bilgileri otomatik olarak dolduruldu!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"PDF işlenirken veya YZ yanıtı çözümlenirken hata oluştu: {e}")
+
+            st.markdown("---")
             with st.form("anamnez_form"):
-                sikayet = st.text_input("Acile Geliş Şikayeti", value=current_patient.get('chief_complaint', '') or "")
-                hikaye = st.text_area("Anamnez / Neler Olmuş? (Hikaye)", value=current_patient.get('anamnesis', '') or "", height=100)
+                sikayet = st.text_input("Acile Geliş Şikayeti", value=safe_str(current_patient.get('chief_complaint')))
+                hikaye = st.text_area("Anamnez / Neler Olmuş? (Hikaye)", value=safe_str(current_patient.get('anamnesis')), height=100)
                 
                 c_og, c_ki = st.columns(2)
                 with c_og:
-                    ozgecmis = st.text_area("Özgeçmiş (ÖG)", value=current_patient.get('history_og', '') or "", height=80)
+                    ozgecmis = st.text_area("Özgeçmiş (ÖG)", value=safe_str(current_patient.get('history_og')), height=80)
                 with c_ki:
-                    ilaclar = st.text_area("Kullandığı İlaçlar (Kİ)", value=current_patient.get('meds_ki', '') or "", height=80)
+                    ilaclar = st.text_area("Kullandığı İlaçlar (Kİ)", value=safe_str(current_patient.get('meds_ki')), height=80)
                 
                 st.markdown("##### İlk Klinik Durum (Yatış Anı)")
                 c1, c2 = st.columns(2)
                 with c1:
-                    ilk_nm = st.text_area("İlk Nörolojik Muayene", value=current_patient.get('initial_nm', '') or "", height=100)
-                    ilk_lab = st.text_area("İlk Laboratuvar Bulguları", value=current_patient.get('initial_labs', '') or "", height=100)
+                    ilk_nm = st.text_area("İlk Nörolojik Muayene", value=safe_str(current_patient.get('initial_nm')), height=100)
+                    ilk_lab = st.text_area("İlk Laboratuvar Bulguları", value=safe_str(current_patient.get('initial_labs')), height=100)
                 with c2:
-                    ilk_noro = st.text_area("İlk Nörogörüntülemeler", value=current_patient.get('initial_neuroimaging', '') or "", height=100)
-                    ekg = st.text_area("EKG", value=current_patient.get('ekg', '') or "", height=100)
+                    ilk_noro = st.text_area("İlk Nörogörüntülemeler", value=safe_str(current_patient.get('initial_neuroimaging')), height=100)
+                    ekg = st.text_area("EKG", value=safe_str(current_patient.get('ekg')), height=100)
                 
                 if st.form_submit_button("💾 İlk Başvuru Bilgilerini Kaydet / Güncelle"):
                     q = """UPDATE patients SET chief_complaint=?, anamnesis=?, history_og=?, meds_ki=?, initial_nm=?, initial_labs=?, initial_neuroimaging=?, ekg=? WHERE id=?"""
@@ -194,7 +288,7 @@ if view_mode == "Aktif Yatan Hastalar":
                             
                             combined_analysis = "\n\n".join(all_responses)
                             eval_id = latest_eval.iloc[0]['id']
-                            old_note = latest_eval.iloc[0]['daily_note'] or ""
+                            old_note = safe_str(latest_eval.iloc[0]['daily_note'])
                             new_note = old_note + f"\n\n[YZ Çoklu Lab Analizi]:\n{combined_analysis}"
                             
                             execute_query("UPDATE daily_evals SET daily_note=? WHERE id=?", [new_note, int(eval_id)])
@@ -217,25 +311,25 @@ if view_mode == "Aktif Yatan Hastalar":
                             epicrisis_prompt = f"""
                             Sen bir yoğun bakım nöroloji uzmanısın. Aşağıdaki güncel klinik verileri kullanarak, resmi dosyaya konulabilecek veya vizitte okunabilecek derli toplu, profesyonel bir GÜNLÜK EPİKRİZ (Progress Note) hazırla.
                             
-                            KİMLİK/TANI: {current_patient['age']} yaş, {current_patient.get('gender', '')}.
+                            KİMLİK/TANI: {current_patient['age']} yaş, {safe_str(current_patient.get('gender', ''))}.
                             Ön Tanı: {patient_diag}
-                            Özgeçmiş: {current_patient.get('history_og', '-')}
-                            Kullandığı İlaçlar: {current_patient.get('meds_ki', '-')}
-                            Yatış Tarihleri: Acil: {current_patient.get('er_admission_date', '-')} / YBÜ: {current_patient.get('icu_admission_date', '-')}
-                            EKG: {current_patient.get('ekg', '-')}
+                            Özgeçmiş: {safe_str(current_patient.get('history_og', '-'))}
+                            Kullandığı İlaçlar: {safe_str(current_patient.get('meds_ki', '-'))}
+                            Yatış Tarihleri: Acil: {safe_str(current_patient.get('er_admission_date', '-'))} / YBÜ: {safe_str(current_patient.get('icu_admission_date', '-'))}
+                            EKG: {safe_str(current_patient.get('ekg', '-'))}
                             
                             BUGÜNKÜ GÖZLEM ({e_data['eval_date']}):
-                            NM: {e_data.get('nm_today', '-')}
-                            Solunum: {e_data.get('intubation_status', '-')} | Sedasyon: {e_data.get('sedasyon', '-')}
-                            İnotrop: {e_data.get('inotrop', '-')} | Anti-Ödem: {e_data.get('anti_odem', '-')}
-                            Antinöbet: {e_data.get('antinobet', '-')} | Antitrombotik: {e_data.get('antitrombotik', '-')}
-                            Antibiyotik: {e_data.get('antibiotics', '-')} | Mayi: {e_data.get('mayi', '-')}
-                            Beslenme: {e_data.get('beslenme', '-')} | Kan Gazı: {e_data.get('kan_gazi', '-')}
-                            Yara: {e_data.get('yara_durumu', '-')}
-                            Nörogörüntüleme: {e_data.get('norogoruntuleme', '-')}
-                            Diğer Görüntüleme: {e_data.get('diger_goruntuleme', '-')}
-                            Konsültasyon: {e_data.get('konsultasyonlar', '-')}
-                            Ek Not & YZ Lab Analizleri: {e_data.get('daily_note', '-')}
+                            NM: {safe_str(e_data.get('nm_today', '-'))}
+                            Solunum: {safe_str(e_data.get('intubation_status', '-'))} | Sedasyon: {safe_str(e_data.get('sedasyon', '-'))}
+                            İnotrop: {safe_str(e_data.get('inotrop', '-'))} | Anti-Ödem: {safe_str(e_data.get('anti_odem', '-'))}
+                            Antinöbet: {safe_str(e_data.get('antinobet', '-'))} | Antitrombotik: {safe_str(e_data.get('antitrombotik', '-'))}
+                            Antibiyotik: {safe_str(e_data.get('antibiotics', '-'))} | Mayi: {safe_str(e_data.get('mayi', '-'))}
+                            Beslenme: {safe_str(e_data.get('beslenme', '-'))} | Kan Gazı: {safe_str(e_data.get('kan_gazi', '-'))}
+                            Yara: {safe_str(e_data.get('yara_durumu', '-'))}
+                            Nörogörüntüleme: {safe_str(e_data.get('norogoruntuleme', '-'))}
+                            Diğer Görüntüleme: {safe_str(e_data.get('diger_goruntuleme', '-'))}
+                            Konsültasyon: {safe_str(e_data.get('konsultasyonlar', '-'))}
+                            Ek Not & YZ Lab Analizleri: {safe_str(e_data.get('daily_note', '-'))}
                             """
                             response = model.generate_content(epicrisis_prompt)
                             st.success("✅ Günlük Epikriz / Özet Hazır")
@@ -254,7 +348,7 @@ if view_mode == "Aktif Yatan Hastalar":
                 eval_id = latest_eval_hy.iloc[0]['id']
                 current_hy = latest_eval_hy.iloc[0]['hasta_yakini']
                 with st.form("hy_form"):
-                    hy_text = st.text_area("Hasta Yakını Bilgilendirme Özeti", value=current_hy if current_hy else "", height=100)
+                    hy_text = st.text_area("Hasta Yakını Bilgilendirme Özeti", value=safe_str(current_hy), height=100)
                     if st.form_submit_button("💾 Bilgilendirmeyi Bugüne Kaydet"):
                         execute_query("UPDATE daily_evals SET hasta_yakini=? WHERE id=?", [hy_text, int(eval_id)], [])
                         st.success("✅ Hasta yakını bilgilendirmesi bugünkü kayda eklendi!")
@@ -275,15 +369,15 @@ if view_mode == "Aktif Yatan Hastalar":
             if user_prompt := st.chat_input("Vaka ile ilgili ne danışmak istersiniz?"):
                 with st.chat_message("user"):
                     st.markdown(user_prompt)
-                execute_query("INSERT INTO ai_chats (patient_id, role, content) VALUES (?, ?, ?)", [int(current_patient['id']), "user", user_prompt])
+                execute_query("INSERT INTO ai_chats (patient_id, role, content) VALUES (?, ?, ?)", [int(current_patient['id']), "user", user_prompt], [])
                 
                 history_text = "\n".join([f"{r['role']}: {r['content']}" for _, r in messages.iterrows()])
                 system_prompt = f"""
                 Sen bir Yoğun Bakım Nöroloji doktorunun kıdemli asistanısın. Vakayı seninle tartışıyor.
-                Hasta: {current_patient['age']} yaş, {current_patient.get('gender', '')}.
-                Şikayet: {current_patient.get('chief_complaint', '-')}
-                Hikaye: {current_patient.get('anamnesis', '-')}
-                İlk Bulgular: {current_patient.get('initial_nm', '-')}
+                Hasta: {current_patient['age']} yaş, {safe_str(current_patient.get('gender', ''))}.
+                Şikayet: {safe_str(current_patient.get('chief_complaint', '-'))}
+                Hikaye: {safe_str(current_patient.get('anamnesis', '-'))}
+                İlk Bulgular: {safe_str(current_patient.get('initial_nm', '-'))}
                 Ön Tanı: {patient_diag}.
                 
                 Geçmiş Konuşmalar:
@@ -300,7 +394,7 @@ if view_mode == "Aktif Yatan Hastalar":
                         response = model.generate_content(system_prompt)
                         with st.chat_message("assistant"):
                             st.markdown(response.text)
-                        execute_query("INSERT INTO ai_chats (patient_id, role, content) VALUES (?, ?, ?)", [int(current_patient['id']), "assistant", response.text])
+                        execute_query("INSERT INTO ai_chats (patient_id, role, content) VALUES (?, ?, ?)", [int(current_patient['id']), "assistant", response.text], [])
                         st.rerun()
                     except Exception as e:
                         st.error(f"Bağlantı hatası: {e}")
@@ -313,10 +407,10 @@ if view_mode == "Aktif Yatan Hastalar":
                 p_date = c1.date_input("Planlanan Tarih", date.today() + timedelta(days=1))
                 p_desc = c2.text_input("İşlem / Konsültasyon / Aksiyon Detayı")
                 if st.form_submit_button("➕ Planı Ekle") and p_desc:
-                    execute_query("INSERT INTO future_plans (patient_id, plan_date, description) VALUES (?, ?, ?)", [int(current_patient['id']), str(p_date), p_desc])
+                    execute_query("INSERT INTO future_plans (patient_id, plan_date, description) VALUES (?, ?, ?)", [int(current_patient['id']), str(p_date), p_desc], [])
                     st.rerun()
                     
-            plans = fetch_data("SELECT * FROM future_plans WHERE patient_id=? ORDER BY is_completed ASC, plan_date ASC", [int(current_patient['id'])])
+            plans = fetch_data("SELECT * FROM future_plans WHERE patient_id=? ORDER BY is_completed ASC, plan_date ASC", [int(current_patient['id'])], [])
             if not plans.empty:
                 for idx, row in plans.iterrows():
                     plan_date = datetime.strptime(row['plan_date'], "%Y-%m-%d").date()
@@ -328,7 +422,7 @@ if view_mode == "Aktif Yatan Hastalar":
                         col_c, col_t = st.columns([0.05, 0.95])
                         check = col_c.checkbox("", key=f"p_{row['id']}")
                         if check:
-                            execute_query("UPDATE future_plans SET is_completed=1 WHERE id=?", [int(row['id'])])
+                            execute_query("UPDATE future_plans SET is_completed=1 WHERE id=?", [int(row['id'])], [])
                             st.rerun()
                         
                         if delta < 0: col_t.error(f"GECİKTİ! [{row['plan_date']}] - {row['description']}")
@@ -340,31 +434,31 @@ if view_mode == "Aktif Yatan Hastalar":
             st.subheader("🗂️ Dosya Dökümü ve Geçmiş Bilgiler")
             
             with st.expander("📌 İLK BAŞVURU VE ANAMNEZ (Hastanın Geçmişi)", expanded=True):
-                st.markdown(f"**Geliş Şikayeti:** {current_patient.get('chief_complaint', '-')}")
-                st.markdown(f"**Hikaye / Ne Olmuş?:** {current_patient.get('anamnesis', '-')}")
-                st.markdown(f"**Özgeçmiş:** {current_patient.get('history_og', '-')}")
-                st.markdown(f"**Kullandığı İlaçlar:** {current_patient.get('meds_ki', '-')}")
-                st.markdown(f"**İlk Nörolojik Muayene:** {current_patient.get('initial_nm', '-')}")
-                st.markdown(f"**İlk Nörogörüntüleme:** {current_patient.get('initial_neuroimaging', '-')}")
+                st.markdown(f"**Geliş Şikayeti:** {safe_str(current_patient.get('chief_complaint', '-'))}")
+                st.markdown(f"**Hikaye / Ne Olmuş?:** {safe_str(current_patient.get('anamnesis', '-'))}")
+                st.markdown(f"**Özgeçmiş:** {safe_str(current_patient.get('history_og', '-'))}")
+                st.markdown(f"**Kullandığı İlaçlar:** {safe_str(current_patient.get('meds_ki', '-'))}")
+                st.markdown(f"**İlk Nörolojik Muayene:** {safe_str(current_patient.get('initial_nm', '-'))}")
+                st.markdown(f"**İlk Nörogörüntüleme:** {safe_str(current_patient.get('initial_neuroimaging', '-'))}")
             
             st.markdown("### 🗓️ Geçmiş Günlük Gözlemler")
-            all_evals = fetch_data("SELECT * FROM daily_evals WHERE patient_id=? ORDER BY eval_date DESC", [int(current_patient['id'])])
+            all_evals = fetch_data("SELECT * FROM daily_evals WHERE patient_id=? ORDER BY eval_date DESC", [int(current_patient['id'])], [])
             
             if not all_evals.empty:
                 for idx, row in all_evals.iterrows():
-                    with st.expander(f"▶️ {row['eval_date']} Tarihli Gözlem Dosyası"):
+                    with st.expander(f"▶️ {safe_str(row['eval_date'])} Tarihli Gözlem Dosyası"):
                         c_sol, c_sag = st.columns(2)
                         with c_sol:
-                            st.markdown(f"**Nörolojik Muayene:** {row['nm_today']}")
-                            st.markdown(f"**Solunum:** {row['intubation_status']} | **Sedasyon:** {row['sedasyon']}")
-                            st.markdown(f"**Beslenme:** {row['beslenme']} | **Mayi:** {row['mayi']}")
+                            st.markdown(f"**Nörolojik Muayene:** {safe_str(row['nm_today'])}")
+                            st.markdown(f"**Solunum:** {safe_str(row['intubation_status'])} | **Sedasyon:** {safe_str(row['sedasyon'])}")
+                            st.markdown(f"**Beslenme:** {safe_str(row['beslenme'])} | **Mayi:** {safe_str(row['mayi'])}")
                         with c_sag:
-                            st.markdown(f"**Nörogörüntüleme:** {row['norogoruntuleme']}")
-                            st.markdown(f"**Konsültasyonlar:** {row['konsultasyonlar']}")
-                            st.markdown(f"**Antibiyotik:** {row['antibiotics']}")
+                            st.markdown(f"**Nörogörüntüleme:** {safe_str(row['norogoruntuleme'])}")
+                            st.markdown(f"**Konsültasyonlar:** {safe_str(row['konsultasyonlar'])}")
+                            st.markdown(f"**Antibiyotik:** {safe_str(row['antibiotics'])}")
                         
-                        st.markdown(f"**Genel Not & Lab Analizleri:** {row['daily_note']}")
-                        st.markdown(f"**Hasta Yakını Bilgilendirme:** {row['hasta_yakini']}")
+                        st.markdown(f"**Genel Not & Lab Analizleri:** {safe_str(row['daily_note'])}")
+                        st.markdown(f"**Hasta Yakını Bilgilendirme:** {safe_str(row['hasta_yakini'])}")
             else:
                 st.info("Bu hastaya ait henüz geçmiş bir günlük gözlem kaydı bulunmuyor.")
             
@@ -379,7 +473,7 @@ if view_mode == "Aktif Yatan Hastalar":
 
             if st.button("Hastayı Arşivle ve Yatağı Boşalt"):
                 try:
-                    execute_query(f"UPDATE patients SET status = '{cikis_turu}', discharge_date = '{cikis_tarihi}', bed_no = NULL WHERE id = {current_patient['id']}", [])
+                    execute_query(f"UPDATE patients SET status = ?, discharge_date = ?, bed_no = NULL WHERE id = ?", [cikis_turu, str(cikis_tarihi), int(current_patient['id'])])
                     st.success(f"Hasta başarıyla {cikis_turu} edildi ve arşive taşındı.")
                     st.rerun() 
                 except Exception as e:
